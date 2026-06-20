@@ -1,0 +1,17 @@
+llm:
+  provider: openai
+  model: gpt-4o
+  api_key: ${OPENAI_API_KEY}
+  temperature: 0.0
+  max_tokens: 4096
+
+skills:
+  base_path: examples/domain_skills/
+
+agents:
+  prompts_path: examples/domain_agents/prompts/
+
+rag:
+  chroma_path: ./chroma_data/
+  embedding_model: text-embedding-3-small
+  collection_name: code_examples
