@@ -7,6 +7,7 @@ Layer: Skill layer (first layer).
 """
 
 import json
+from pathlib import Path
 from typing import Optional
 
 from liteagent.core.base_skill import BaseSkill
@@ -35,16 +36,23 @@ class CodeEmbedderImpl(BaseSkill):
 
     def execute(
         self,
-        design_content: str,
-        code_content: str,
+        design_content: str = "",
+        code_content: str = "",
+        design_path: str = "",
+        code_path: str = "",
         metadata_json: str = "{}",
         doc_id: str = "",
     ) -> dict:
         """Embed a design+code pair and store in RAG.
 
+        Accepts either contents directly or file paths (paths are preferred
+        as they avoid passing large content through the LLM context).
+
         Args:
-            design_content: The design document content.
-            code_content: The implementation code content.
+            design_content: The design document content (ignored if design_path given).
+            code_content: The implementation code content (ignored if code_path given).
+            design_path: Path to the design document (.md) to read and embed.
+            code_path: Path to the implementation file (.py) to read and embed.
             metadata_json: JSON string with extra metadata.
             doc_id: Optional explicit document ID.
 
@@ -54,6 +62,21 @@ class CodeEmbedderImpl(BaseSkill):
         try:
             if self._rag_store is None:
                 return {"status": "error", "error": "RAG store not initialized. Call set_rag_store() first."}
+
+            if design_path:
+                dp = Path(design_path)
+                if not dp.exists():
+                    return {"status": "error", "error": f"Design file not found: {design_path}"}
+                design_content = dp.read_text(encoding="utf-8")
+
+            if code_path:
+                cp = Path(code_path)
+                if not cp.exists():
+                    return {"status": "error", "error": f"Code file not found: {code_path}"}
+                code_content = cp.read_text(encoding="utf-8")
+
+            if not design_content and not code_content:
+                return {"status": "error", "error": "Neither content nor paths provided."}
 
             if len(design_content) > 50000:
                 return {"status": "error", "error": f"Design content too long ({len(design_content)} chars). Max: 50000."}

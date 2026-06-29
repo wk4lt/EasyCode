@@ -13,5 +13,6 @@ agents:
 
 rag:
   chroma_path: ./chroma_data/
-  embedding_model: text-embedding-3-small
+  embedding_provider: local
+  embedding_model: all-MiniLM-L6-v2
   collection_name: code_examples

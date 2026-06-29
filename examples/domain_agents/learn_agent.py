@@ -16,13 +16,16 @@ class LearnAgent(BaseAgent):
         """Format the learning task as a user message.
 
         Args:
-            local_input: Dict with 'example_dirs', 'pair_count', and
-                optional 'clarification_response' from the user.
+            local_input: Dict with 'example_dirs', 'design_doc_paths',
+                'impl_paths', 'pair_count', and optional
+                'clarification_response' from the user.
 
         Returns:
             Formatted learning request string.
         """
         example_dirs = local_input.get("example_dirs", [])
+        design_doc_paths = local_input.get("design_doc_paths", [])
+        impl_paths = local_input.get("impl_paths", [])
         pair_count = local_input.get("pair_count", 0)
         clarification_response = local_input.get("clarification_response", "")
 
@@ -40,11 +43,20 @@ class LearnAgent(BaseAgent):
                 "directories containing design doc + implementation code pairs."
             )
 
+        pairs_text = ""
+        if design_doc_paths and impl_paths:
+            pairs_text = "\nFiles discovered:\n"
+            for i, (design, impl) in enumerate(zip(design_doc_paths, impl_paths), 1):
+                pairs_text += f"  {i}. Design: {design}\n     Impl:   {impl}\n"
+            pairs_text += f"\n"
+        else:
+            pairs_text = f"\nFound {pair_count} design+code pairs to process.\n\n"
+
         return (
             f"Process and learn from code examples in the following directories:\n\n"
             + "\n".join(f"  - {d}" for d in example_dirs)
-            + f"\n\nFound {pair_count} design+code pairs to process.\n\n"
-            "For each pair:\n"
+            + f"\n\n{pairs_text}"
+            + "For each pair listed above:\n"
             "1. Read the .md design document using file_reader\n"
             "2. Read the corresponding .py implementation using file_reader\n"
             "3. If the design or code is incomplete, ambiguous, or mismatched, "

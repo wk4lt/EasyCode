@@ -161,6 +161,7 @@ class BaseAgent(ABC):
 
             user_content = self._build_user_message(local_input)
             self._memory.add_message(self.name, "user", user_content)
+            _log.info("user_message", extra={**ctx, "content": user_content})
 
             tools = self._get_tool_schemas()
 
@@ -176,6 +177,9 @@ class BaseAgent(ABC):
                 if response.tool_calls:
                     tool_names = [tc.name for tc in response.tool_calls]
                     _log.info("tool_calls", extra={**ctx, "step": f"round_{round_idx}", "tools": tool_names})
+
+                    if response.content:
+                        _log.info("assistant_thought", extra={**ctx, "step": f"round_{round_idx}", "thought": response.content})
 
                     assistant_msg: dict = {
                         "role": "assistant",
@@ -197,9 +201,11 @@ class BaseAgent(ABC):
                     })
 
                     for tc in response.tool_calls:
+                        _log.info("tool_call", extra={**ctx, "tool": tc.name, "tool_args": json.dumps(tc.arguments, ensure_ascii=False)[:200]})
                         tool_output = self._execute_skill(tc.name, tc.arguments)
                         if tool_output.get("status") == "error":
                             _log.warning("tool_error", extra={**ctx, "tool": tc.name, "error": tool_output.get("error", "")})
+                        _log.info("tool_result", extra={**ctx, "tool": tc.name, "result": json.dumps(tool_output, ensure_ascii=False)[:300]})
                         self._memory.add_message(
                             self.name,
                             "tool",
@@ -208,7 +214,7 @@ class BaseAgent(ABC):
                             name=tc.name,
                         )
                 else:
-                    _log.info("invoke_done", extra={**ctx, "rounds": round_idx + 1, "total_tokens": total_token_usage["total_tokens"]})
+                    _log.info("assistant_final", extra={**ctx, "rounds": round_idx + 1, "tokens": total_token_usage["total_tokens"], "response": response.content})
                     return AgentOutput(
                         business_result=response.content or "",
                         token_usage=total_token_usage,

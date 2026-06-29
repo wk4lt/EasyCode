@@ -60,8 +60,6 @@ liteagent/                  # Framework package
 
 examples/                   # Demonstration project
 ├── domain_skills/          # Skill implementations (.py + .md pairs)
-│   ├── search_tools/
-│   ├── risk_tools/
 │   └── codegen_tools/      # CodeGen skills (file_reader, embedder, retriever, generator, tester)
 ├── domain_agents/          # Agent definitions + prompts/
 │   ├── prompts/
@@ -70,6 +68,7 @@ examples/                   # Demonstration project
 │   ├── learn_agent.py
 │   └── gen_agent.py
 ├── workflows/              # Workflow graphs + states.py
+│   ├── states.py           # Global State models (IndexState, CodeGenState)
 │   ├── index_workflow.py   # IndexWorkflow: discover → learn → [done|needs_user]
 │   └── codegen_workflow.py # CodeGenWorkflow: read → retrieve → generate → test → [passed|retry|needs_user]
 ├── config.yaml
@@ -118,7 +117,7 @@ Two new workflows for learning from examples and generating code:
 
 - **`config.yaml` uses `${ENV_VAR}` substitution.** API keys should use `${OPENAI_API_KEY}` rather than plaintext. Both root `config.yaml` and `examples/config.yaml` are identical.
 - **Skill auto-discovery prefers `SKILL_*.md` filenames** but falls back to any `.md` file. Implementation files must be `*_impl.py` in the same directory.
-- **Every `Workflow` subclass must implement a `build()` method** that calls `add_agent_node`, `set_entry_point`, etc. The `OrderProcessingWorkflow` in `examples/workflows/order_processing_wf.py` is the reference pattern.
+- **Every `Workflow` subclass must implement a `build()` method** that calls `add_agent_node`, `set_entry_point`, etc. The `CodeGenWorkflow` in `examples/workflows/codegen_workflow.py` is the reference pattern.
 - **`examples/main.py` is an interactive REPL** (type `help` at the prompt). Use `--config` flag to point at a different config file.
 - **Tests mock all LLM calls.** They do not require any API keys or network access.
 - **Logger names matter.** `configure_root_logger()` sets the `liteagent` logger level and silences `openai`, `httpcore`, `httpx`, `urllib3` at WARNING. Always use `logging.getLogger(__name__)` with `extra={"layer": "...", "agent_name": "..."}` for structured output.

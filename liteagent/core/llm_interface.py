@@ -64,7 +64,7 @@ class LLMInterface(ABC):
 class OpenAIAdapter(LLMInterface):
     """OpenAI SDK adapter implementing the standardized LLM interface."""
 
-    def __init__(self, api_key: str, model: str = "gpt-4o", temperature: float = 0.0, max_tokens: int = 4096):
+    def __init__(self, api_key: str, model: str = "gpt-4o", temperature: float = 0.0, max_tokens: int = 4096, base_url: str = ""):
         """Initialize the OpenAI adapter.
 
         Args:
@@ -72,17 +72,22 @@ class OpenAIAdapter(LLMInterface):
             model: Model identifier.
             temperature: Sampling temperature (0.0 for deterministic output).
             max_tokens: Maximum completion tokens.
+            base_url: Optional custom base URL for OpenAI-compatible providers.
         """
         self._model = model
         self._temperature = temperature
         self._max_tokens = max_tokens
         self._api_key = api_key
+        self._base_url = base_url
 
     def _get_client(self):
         """Lazy-import the OpenAI client to avoid import-time coupling."""
         from openai import OpenAI
 
-        return OpenAI(api_key=self._api_key)
+        kwargs = {"api_key": self._api_key}
+        if self._base_url:
+            kwargs["base_url"] = self._base_url
+        return OpenAI(**kwargs)
 
     def chat_completion(
         self,

@@ -1,174 +1,63 @@
-"""LiteAgent interactive REPL — order processing + code generation.
+"""LiteAgent interactive REPL — CodeGen workflows.
 
 Usage:
     python examples/main.py
     python examples/main.py --config path/to/config.yaml
 
 Commands (type at the liteagent> prompt):
-    process             Enter a new order interactively and run the workflow
-    demo                Run batch demo with 4 sample orders
-    learn <dir> [...]   Index design doc + implementation pairs into RAG
-    generate <d> <t> <o>  Generate code from design doc + test file
-    config              Show current LLM, path, and RAG configuration
-    verbose [on|off]    Toggle verbose logging on/off
-    help                Show this help
-    quit                Exit the REPL
+    learn <dir> [...]      Index design doc + implementation pairs into RAG
+    generate <d> <t> <o>   Generate code from design doc + test file
+    config                 Show current LLM, path, and RAG configuration
+    raginfo                Show RAG store statistics
+    verbose [on|off]       Toggle verbose (DEBUG) logging on/off
+    help                   Show this help
+    quit                   Exit the REPL
 """
 
 import logging
 import os
 import shlex
 import sys
+from pathlib import Path
 
-from liteagent.core.config import create_llm, load_config
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from liteagent.core.config import load_config
 from liteagent.core.logger import configure_root_logger
-
 
 BANNER = r"""
 ╔══════════════════════════════════════════════╗
-║          LiteAgent Order Processing          ║
+║           LiteAgent CodeGen REPL             ║
 ║     Skill → Agent → Workflow Architecture    ║
-║         + CodeGen: Learn → Generate          ║
+║         Learn → Generate → Test              ║
 ╚══════════════════════════════════════════════╝"""
 
 HELP_TEXT = """
 Commands:
-  process             Enter a new order interactively and run the workflow
-  demo                Run batch demo with 4 sample orders
-  learn <dir> [...]   Index design doc + implementation pairs into RAG
-  generate <d> <t> <o>  Generate code from design doc + test file
-  config              Show current configuration
-  raginfo             Show RAG store statistics
-  verbose [on|off]    Toggle verbose (DEBUG) logging
-  help                Show this help
-  quit, exit          Exit the REPL
+  learn <dir> [...]      Index SKILL_*.md + *_impl.py pairs into RAG
+  generate <d> <t> <o>   Generate code from design doc + test file
+  config                 Show current configuration
+  raginfo                Show RAG store statistics
+  verbose [on|off]       Toggle verbose (DEBUG) logging
+  help                   Show this help
+  quit, exit             Exit the REPL
 
-Order workflow: search → risk → decision
 CodeGen workflow: read → retrieve → generate → test
+Index workflow:  discover → learn → [done | needs_user]
 """
 
-TIER_CHOICES = {"new", "bronze", "silver", "gold"}
-REGION_CHOICES = {"NA", "EU", "AS", "AF", "SA", "OC"}
 
+def _make_rag_store(config):
+    from liteagent.core.rag_store import create_rag_store
 
-def _prompt(prompt_text: str, default: str = "", choices: set[str] | None = None) -> str:
-    """Prompt the user for input with optional validation.
-
-    Args:
-        prompt_text: Display text for the prompt.
-        default: Default value if user enters empty string.
-        choices: If set, only accept values in this set (case-insensitive).
-
-    Returns:
-        The validated input string.
-    """
-    while True:
-        if default:
-            value = input(f"  {prompt_text} [{default}]: ").strip()
-            if not value:
-                return default
-        else:
-            value = input(f"  {prompt_text}: ").strip()
-
-        if choices and value.lower() not in choices:
-            valid = ", ".join(sorted(choices))
-            print(f"  Invalid choice. Must be one of: {valid}")
-            continue
-
-        return value
-
-
-def cmd_process(wf_cls, state_cls, config):
-    """Interactive order entry — prompt for fields, then run the workflow."""
-    print("\n  Enter order details (press Enter for defaults):\n")
-
-    order_id = _prompt("Order ID", default="ORD-001")
-    customer_name = _prompt("Customer Name", default="Alice Johnson")
-    customer_tier = _prompt("Customer Tier", default="new", choices=TIER_CHOICES)
-    raw_amount = _prompt("Amount (USD)", default="1000.00")
-
-    try:
-        amount = float(raw_amount)
-    except ValueError:
-        print(f"  Invalid amount '{raw_amount}', using 1000.00")
-        amount = 1000.00
-
-    region = _prompt("Region", default="NA", choices=REGION_CHOICES)
-    product = _prompt("Product", default="Electronics")
-
-    initial_state = state_cls(
-        order_id=order_id,
-        customer_name=customer_name,
-        customer_tier=customer_tier.lower(),
-        amount=amount,
-        region=region.upper(),
-        product=product,
-        search_query=f"background information for {customer_name} and {product}",
+    return create_rag_store(
+        persist_dir=config.rag.chroma_path,
+        embedding_provider=config.rag.embedding_provider,
+        embedding_model=config.rag.embedding_model,
+        collection_name=config.rag.collection_name,
+        api_key=config.llm.api_key,
+        base_url=config.llm.base_url,
     )
-
-    print(f"\n  Running workflow: search_node → risk_node → decision_node ...")
-
-    wf = wf_cls(state_model=state_cls)
-    wf.build(config=config)
-
-    try:
-        result = wf.invoke(initial_state)
-    except Exception as e:
-        print(f"\n  ERROR: Workflow execution failed: {e}")
-        return
-
-    print(f"\n  {'─'*40}")
-    print(f"  Decision:    {result.final_decision.upper()}")
-    print(f"  Reason:      {result.decision_reason}")
-    print(f"  Risk Score:  {result.risk_score}/100 ({result.risk_level})")
-    flags = ", ".join(result.risk_flags) if result.risk_flags else "none"
-    print(f"  Risk Flags:  {flags}")
-    if result.search_result:
-        print(f"\n  --- Search Result (first 300 chars) ---")
-        print(f"  {result.search_result[:300]}")
-    if result.error:
-        print(f"\n  --- Error ---")
-        print(f"  {result.error}")
-    print(f"  {'─'*40}\n")
-
-
-def cmd_demo(wf_cls, state_cls, config):
-    """Run the 4 sample orders and show a summary table."""
-    orders = [
-        {"id": "ORD-001", "name": "Alice Johnson", "tier": "gold", "amount": 1500.00, "region": "NA", "product": "Laptop Computer"},
-        {"id": "ORD-002", "name": "Bob Smith", "tier": "new", "amount": 15000.00, "region": "AF", "product": "Industrial Equipment"},
-        {"id": "ORD-003", "name": "Charlie Brown", "tier": "silver", "amount": 6000.00, "region": "AS", "product": "Smartphone"},
-        {"id": "ORD-004", "name": "Diana Prince", "tier": "bronze", "amount": 300.00, "region": "EU", "product": "Books"},
-    ]
-
-    wf = wf_cls(state_model=state_cls)
-    wf.build(config=config)
-
-    rows = []
-    print(f"\n  {'ID':<10} {'Customer':<18} {'Amount':>10} {'Region':<8} {'Decision':<10} {'Risk'}")
-    print(f"  {'─'*10} {'─'*18} {'─'*10} {'─'*8} {'─'*10} {'─'*6}")
-
-    for o in orders:
-        state = state_cls(
-            order_id=o["id"],
-            customer_name=o["name"],
-            customer_tier=o["tier"],
-            amount=o["amount"],
-            region=o["region"],
-            product=o["product"],
-            search_query=f"background information for {o['name']} and {o['product']}",
-        )
-        try:
-            result = wf.invoke(state)
-            decision = result.final_decision.upper()
-            risk = f"{result.risk_score}/100"
-        except Exception as e:
-            decision = "ERROR"
-            risk = str(e)[:20]
-
-        print(f"  {o['id']:<10} {o['name']:<18} ${o['amount']:>9,.2f} {o['region']:<8} {decision:<10} {risk}")
-
-    print()
 
 
 def cmd_config(config_path: str):
@@ -187,17 +76,12 @@ def cmd_config(config_path: str):
 
     if raw:
         llm = raw.get("llm", {})
-        model = llm.get("model", "?")
-        provider = llm.get("provider", "?")
-        temp = llm.get("temperature", "?")
-        max_tok = llm.get("max_tokens", "?")
+        print(f"  Provider:     {llm.get('provider', '?')}")
+        print(f"  Model:        {llm.get('model', '?')}")
+        print(f"  Temperature:  {llm.get('temperature', '?')}")
+        print(f"  Max tokens:   {llm.get('max_tokens', '?')}")
         api_key = llm.get("api_key", "")
         key_display = "***" if api_key and api_key != "${OPENAI_API_KEY}" else api_key
-
-        print(f"  Provider:     {provider}")
-        print(f"  Model:        {model}")
-        print(f"  Temperature:  {temp}")
-        print(f"  Max tokens:   {max_tok}")
         print(f"  API key:      {key_display}")
 
     skills = (raw or {}).get("skills", {})
@@ -220,29 +104,21 @@ def cmd_learn(config, args):
     """
     if not args:
         print("  Usage: learn <dir1> [dir2 ...]")
-        print("  Example: learn examples/domain_skills/search_tools/")
+        print("  Example: learn examples/domain_skills/codegen_tools/")
         return
 
-    from liteagent.core.rag_store import create_rag_store
     from examples.workflows.index_workflow import IndexWorkflow
     from examples.workflows.states import IndexState
 
     print(f"\n  Scanning directories for SKILL_*.md + *_impl.py pairs...")
 
-    rag_store = create_rag_store(
-        persist_dir=config.rag.chroma_path,
-        api_key=config.llm.api_key,
-        embedding_model=config.rag.embedding_model,
-        collection_name=config.rag.collection_name,
-    )
-
-    wf = IndexWorkflow(state_model=IndexState)
-
-    initial_state = IndexState(example_dirs=list(args))
-
-    wf.build(config=config, rag_store=rag_store)
+    rag_store = _make_rag_store(config)
 
     try:
+        wf = IndexWorkflow(state_model=IndexState)
+        wf.build(config=config, rag_store=rag_store)
+
+        initial_state = IndexState(example_dirs=list(args))
         result = wf.invoke(initial_state)
     except Exception as e:
         print(f"\n  ERROR: Indexing failed: {e}")
@@ -268,7 +144,6 @@ def cmd_learn(config, args):
     print(f"\n  {'─'*40}")
     print(f"  Status:    {result.status}")
     print(f"  Indexed:   {result.indexed_count}")
-    print(f"  Skipped:   {result.skipped_count}")
     if result.error:
         print(f"  Error:     {result.error}")
     print(f"  RAG store: {rag_store.count()} total documents")
@@ -284,12 +159,11 @@ def cmd_generate(config, args):
         print("  Usage: generate <design.md> <test.py> <output.py>")
         return
 
-    design_path, test_path, output_path = args[0], args[1], args[2]
-
     from pathlib import Path
-    from liteagent.core.rag_store import create_rag_store
     from examples.workflows.codegen_workflow import CodeGenWorkflow
     from examples.workflows.states import CodeGenState
+
+    design_path, test_path, output_path = args[0], args[1], args[2]
 
     if not Path(design_path).exists():
         print(f"  Design doc not found: {design_path}")
@@ -303,27 +177,18 @@ def cmd_generate(config, args):
     print(f"    Test:    {test_path}")
     print(f"    Output:  {output_path}")
 
-    rag_store = create_rag_store(
-        persist_dir=config.rag.chroma_path,
-        api_key=config.llm.api_key,
-        embedding_model=config.rag.embedding_model,
-        collection_name=config.rag.collection_name,
-    )
-
+    rag_store = _make_rag_store(config)
     print(f"    RAG:     {rag_store.count()} examples available")
 
-    wf = CodeGenWorkflow(state_model=CodeGenState)
-
-    initial_state = CodeGenState(
-        design_doc_path=design_path,
-        test_file_path=test_path,
-        output_path=output_path,
-    )
-
-    wf.build(config=config, rag_store=rag_store)
-
-    result = None
     try:
+        wf = CodeGenWorkflow(state_model=CodeGenState)
+        wf.build(config=config, rag_store=rag_store)
+
+        initial_state = CodeGenState(
+            design_doc_path=design_path,
+            test_file_path=test_path,
+            output_path=output_path,
+        )
         result = wf.invoke(initial_state)
     except Exception as e:
         print(f"\n  ERROR: Code generation failed: {e}")
@@ -366,17 +231,9 @@ def cmd_generate(config, args):
 
 def cmd_raginfo(config):
     """Show RAG store statistics."""
-    from liteagent.core.rag_store import create_rag_store
-
-    rag_store = create_rag_store(
-        persist_dir=config.rag.chroma_path,
-        api_key=config.llm.api_key,
-        embedding_model=config.rag.embedding_model,
-        collection_name=config.rag.collection_name,
-    )
-
     print(f"\n  RAG Store Info")
     print(f"  {'─'*30}")
+    rag_store = _make_rag_store(config)
     print(f"  Path:        {config.rag.chroma_path}")
     print(f"  Collection:  {config.rag.collection_name}")
     print(f"  Model:       {config.rag.embedding_model}")
@@ -389,93 +246,6 @@ def cmd_raginfo(config):
         if len(ids) > 20:
             print(f"    ... and {len(ids) - 20} more")
     print()
-
-
-def main():
-    """Entry point — build the REPL loop."""
-
-    config_path = "config.yaml"
-    argv = sys.argv[1:]
-    if len(argv) >= 2 and argv[0] == "--config":
-        config_path = argv[1]
-
-    verbose = False
-
-    try:
-        config = load_config(config_path)
-    except FileNotFoundError:
-        print(f"\n  Config file not found: {config_path}")
-        print("  Create one with: cp examples/config.yaml config.yaml")
-        print("  Then set your OPENAI_API_KEY in config.yaml or as an env var.")
-        config = None
-    except Exception as e:
-        print(f"\n  Failed to load config: {e}")
-        config = None
-
-    configure_root_logger(level=logging.INFO)
-
-    from examples.workflows.order_processing_wf import OrderProcessingWorkflow
-    from examples.workflows.states import OrderState
-
-    print(BANNER)
-
-    if config:
-        print(f"  Model: {config.llm.model}  |  Log: {'DEBUG' if verbose else 'INFO'}")
-    else:
-        print("  WARNING: Config not loaded. 'process' and 'demo' are disabled.")
-    print(f'  Type "help" for commands, "quit" to exit.\n')
-
-    while True:
-        try:
-            raw = input("liteagent> ").strip()
-        except (EOFError, KeyboardInterrupt):
-            print()
-            break
-
-        if not raw:
-            continue
-
-        parts = shlex.split(raw)
-        cmd = parts[0].lower()
-        args = parts[1:]
-
-        if cmd in ("quit", "exit", "q"):
-            break
-        elif cmd == "help":
-            print(HELP_TEXT)
-        elif cmd == "config":
-            cmd_config(config_path)
-        elif cmd == "verbose":
-            verbose = _toggle_verbose(verbose, args)
-        elif cmd == "process":
-            if config is None:
-                print("  Cannot process: no config loaded. Check config.yaml exists.")
-                continue
-            cmd_process(OrderProcessingWorkflow, OrderState, config)
-        elif cmd == "demo":
-            if config is None:
-                print("  Cannot run demo: no config loaded. Check config.yaml exists.")
-                continue
-            cmd_demo(OrderProcessingWorkflow, OrderState, config)
-        elif cmd == "learn":
-            if config is None:
-                print("  Cannot learn: no config loaded. Check config.yaml exists.")
-                continue
-            cmd_learn(config, args)
-        elif cmd == "generate" or cmd == "gen":
-            if config is None:
-                print("  Cannot generate: no config loaded. Check config.yaml exists.")
-                continue
-            cmd_generate(config, args)
-        elif cmd == "raginfo":
-            if config is None:
-                print("  Cannot show RAG info: no config loaded.")
-                continue
-            cmd_raginfo(config)
-        else:
-            print(f"  Unknown command: {cmd}. Type 'help' for available commands.")
-
-    print("  Goodbye.\n")
 
 
 def _toggle_verbose(verbose: bool, args: list[str]) -> bool:
@@ -491,6 +261,89 @@ def _toggle_verbose(verbose: bool, args: list[str]) -> bool:
     configure_root_logger(level=level)
     print(f"  Verbose logging: {'ON' if verbose else 'OFF'}")
     return verbose
+
+
+def main():
+    """Entry point — start the REPL loop."""
+    config_path = "config.yaml"
+    argv = sys.argv[1:]
+    if len(argv) >= 2 and argv[0] == "--config":
+        config_path = argv[1]
+
+    verbose = [False]
+
+    try:
+        config = load_config(config_path)
+    except FileNotFoundError:
+        print(f"\n  Config file not found: {config_path}")
+        print("  Create one with: cp examples/config.yaml config.yaml")
+        print("  Then set your OPENAI_API_KEY in config.yaml or as an env var.")
+        config = None
+    except Exception as e:
+        print(f"\n  Failed to load config: {e}")
+        config = None
+
+    configure_root_logger(level=logging.INFO)
+    print(BANNER)
+
+    if config:
+        print(f"  Model: {config.llm.model}  |  Log: {'DEBUG' if verbose[0] else 'INFO'}")
+    else:
+        print("  WARNING: Config not loaded. Commands will be disabled.")
+    print(f'  Type "help" for commands, "quit" to exit.\n')
+
+    commands = {
+        ("quit", "exit", "q"): lambda _args: "QUIT",
+        "help": lambda _args: print(HELP_TEXT),
+        "config": lambda _args: cmd_config(config_path),
+        "verbose": lambda args: verbose.__setitem__(0, _toggle_verbose(verbose[0], args)),
+        "raginfo": lambda _args: _require_config(cmd_raginfo, config, _args),
+        "learn": lambda args: _require_config(cmd_learn, config, args),
+        "generate": lambda args: _require_config(cmd_generate, config, args),
+        "gen": lambda args: _require_config(cmd_generate, config, args),
+    }
+
+    while True:
+        try:
+            raw = input("liteagent> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            break
+
+        if not raw:
+            continue
+
+        parts = shlex.split(raw)
+        cmd = parts[0].lower()
+        args = parts[1:]
+
+        handler = None
+        for key, fn in commands.items():
+            if isinstance(key, tuple):
+                if cmd in key:
+                    handler = fn
+                    break
+            elif key == cmd:
+                handler = fn
+                break
+
+        if handler is None:
+            print(f"  Unknown command: {cmd}. Type 'help' for available commands.")
+            continue
+
+        result = handler(args)
+        if result == "QUIT":
+            break
+
+    print("  Goodbye.\n")
+
+
+def _require_config(fn, config, args):
+    """Only invoke fn if config is loaded."""
+    if config is None:
+        print("  Command unavailable: no config loaded. Check config.yaml exists.")
+        return
+    fn(config, args)
 
 
 if __name__ == "__main__":

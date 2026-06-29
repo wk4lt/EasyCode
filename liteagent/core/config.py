@@ -40,7 +40,8 @@ class RAGConfig(BaseModel):
     """RAG / vector store configuration."""
 
     chroma_path: str = Field(default="./chroma_data/", description="Directory for ChromaDB persistent storage.")
-    embedding_model: str = Field(default="text-embedding-3-small", description="OpenAI embedding model name.")
+    embedding_provider: str = Field(default="local", description="Embedding provider: 'local' or 'openai'.")
+    embedding_model: str = Field(default="all-MiniLM-L6-v2", description="Embedding model name.")
     collection_name: str = Field(default="code_examples", description="ChromaDB collection name.")
 
 
@@ -97,14 +98,18 @@ def create_llm(config: LLMConfig) -> LLMInterface:
     """
     provider = config.provider.lower()
 
-    if provider == "openai":
+    if provider == "openai" or (provider.startswith("https://") or provider.startswith("http://")):
         if not config.api_key:
             raise ValueError("OPENAI_API_KEY is required. Set it in config.yaml or via env var.")
+        base_url = config.base_url
+        if provider.startswith("http"):
+            base_url = base_url or provider
         return OpenAIAdapter(
             api_key=config.api_key,
             model=config.model,
             temperature=config.temperature,
             max_tokens=config.max_tokens,
+            base_url=base_url,
         )
 
     raise ValueError(f"Unknown LLM provider: '{config.provider}'. Supported: openai")

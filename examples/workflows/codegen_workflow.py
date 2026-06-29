@@ -237,9 +237,11 @@ class CodeGenWorkflow(BaseWorkflow):
         if rag_store is None:
             rag_store = create_rag_store(
                 persist_dir=config.rag.chroma_path,
-                api_key=config.llm.api_key,
+                embedding_provider=config.rag.embedding_provider,
                 embedding_model=config.rag.embedding_model,
                 collection_name=config.rag.collection_name,
+                api_key=config.llm.api_key,
+                base_url=config.llm.base_url,
             )
 
         sr = SkillRegistry()

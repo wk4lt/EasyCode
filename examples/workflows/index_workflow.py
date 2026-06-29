@@ -93,11 +93,13 @@ def learn_input_mapper(state: IndexState) -> dict:
         state: Current IndexState.
 
     Returns:
-        Local dict with example directories, pair count, and
-        clarification response if resuming from a checkpoint.
+        Local dict with example directories, discovered file paths,
+        and clarification response if resuming from a checkpoint.
     """
     return {
         "example_dirs": state.example_dirs,
+        "design_doc_paths": state.design_doc_paths,
+        "impl_paths": state.impl_paths,
         "pair_count": len(state.design_doc_paths),
         "clarification_response": state.clarification_response,
     }
@@ -145,12 +147,18 @@ def learn_reducer(state: IndexState, agent_output: AgentOutput) -> dict:
             "status": "needs_user",
         }
 
+    import re
+
     indexed = 0
-    if "Successfully indexed:" in result:
-        import re
-        m = re.search(r"Successfully indexed:\s*(\d+)", result)
+    for pattern in [
+        r"Successfully indexed:\s*(\d+)",
+        r"successfully\s+(?:embedded|indexed).*?\b(\d+)\b",
+        r"All\s+(\d+)\s+pairs?\s+successfully",
+    ]:
+        m = re.search(pattern, result, re.IGNORECASE)
         if m:
             indexed = int(m.group(1))
+            break
 
     return {
         "indexed_count": indexed,
@@ -218,9 +226,11 @@ class IndexWorkflow(BaseWorkflow):
         if rag_store is None:
             rag_store = create_rag_store(
                 persist_dir=config.rag.chroma_path,
-                api_key=config.llm.api_key,
+                embedding_provider=config.rag.embedding_provider,
                 embedding_model=config.rag.embedding_model,
                 collection_name=config.rag.collection_name,
+                api_key=config.llm.api_key,
+                base_url=config.llm.base_url,
             )
 
         sr = SkillRegistry()

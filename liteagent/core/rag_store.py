@@ -5,15 +5,17 @@ implementation pairs) and retrieving similar examples during code
 generation.
 
 Supports two backends:
-  - ChromaDB (persistent, requires `chromadb` package)
-  - InMemory (ephemeral, for testing, always available)
+  - ChromaDB with local embeddings (default, requires `chromadb` package)
+  - InMemory with JSON file persistence (fallback)
 
 Layer: Core infrastructure.
 """
 
+import json
 import logging
 import os
 import uuid
+from pathlib import Path
 from typing import Optional
 
 _log = logging.getLogger(__name__)
@@ -23,37 +25,51 @@ DEFAULT_COLLECTION = "code_examples"
 
 def create_rag_store(
     persist_dir: str = "./chroma_data",
-    api_key: Optional[str] = None,
-    embedding_model: str = "text-embedding-3-small",
+    api_key: str = "",
+    embedding_model: str = "all-MiniLM-L6-v2",
+    embedding_provider: str = "local",
     collection_name: str = DEFAULT_COLLECTION,
+    base_url: str = "",
 ) -> "BaseRAGStore":
     """Factory: create the appropriate RAG store backend.
 
-    Tries ChromaDB first; falls back to InMemory if chromadb is not installed.
+    Tries ChromaRAGStore with local embeddings first; falls back
+    to InMemoryRAGStore if chromadb is not installed.
 
     Args:
-        persist_dir: Directory for persistent storage (ChromaDB only).
-        api_key: OpenAI API key for embeddings. Falls back to env var.
-        embedding_model: OpenAI embedding model name.
-        collection_name: Collection/table name.
+        persist_dir: Directory for persistent ChromaDB storage.
+        api_key: API key for OpenAI embeddings (only when embedding_provider="openai").
+        embedding_model: Model name. For local: all-MiniLM-L6-v2 (ONNX). For openai: text-embedding-3-small.
+        embedding_provider: "local" (default) or "openai".
+        collection_name: Collection name.
+        base_url: Custom base URL for OpenAI-compatible embeddings API.
 
     Returns:
         A BaseRAGStore implementation.
     """
     try:
-        import chromadb
         return ChromaRAGStore(
             persist_dir=persist_dir,
             api_key=api_key,
             embedding_model=embedding_model,
+            embedding_provider=embedding_provider,
             collection_name=collection_name,
+            base_url=base_url,
         )
     except ImportError:
-        _log.warning("chromadb_not_installed", extra={
+        _log.warning("chromadb_not_available", extra={
             "layer": "core",
-            "detail": "ChromaDB not available; using in-memory RAG store.",
+            "detail": "ChromaDB not available; using in-memory RAG store with JSON persistence.",
         })
-        return InMemoryRAGStore(collection_name=collection_name)
+        persist_path = os.path.join(persist_dir, f"{collection_name}.json")
+        return InMemoryRAGStore(collection_name=collection_name, persist_path=persist_path)
+    except Exception as e:
+        _log.warning("chromadb_init_failed", extra={
+            "layer": "core",
+            "detail": str(e),
+        })
+        persist_path = os.path.join(persist_dir, f"{collection_name}.json")
+        return InMemoryRAGStore(collection_name=collection_name, persist_path=persist_path)
 
 
 class BaseRAGStore:
@@ -92,20 +108,69 @@ class BaseRAGStore:
 
 
 class InMemoryRAGStore(BaseRAGStore):
-    """In-memory RAG store for testing and standalone usage.
+    """In-memory RAG store with JSON file persistence.
 
     Uses simple TF-IDF + cosine similarity (via scikit-learn / numpy)
     when available, otherwise falls back to substring matching.
+
+    Documents auto-load from disk on init and auto-save on every add.
     """
 
-    def __init__(self, collection_name: str = DEFAULT_COLLECTION):
+    def __init__(self, collection_name: str = DEFAULT_COLLECTION, persist_path: str = ""):
         """Initialize the in-memory store.
 
         Args:
             collection_name: Collection name (for interface compatibility).
+            persist_path: Path to the JSON file for persistence.
+                If the file exists, documents are loaded on init.
         """
         self._collection_name = collection_name
+        self._persist_path = persist_path
         self._docs: dict[str, dict] = {}
+
+        if self._persist_path:
+            self._load()
+
+    def _load(self) -> None:
+        """Load documents from the persistent JSON file."""
+        path = Path(self._persist_path)
+        if not path.exists():
+            return
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            self._docs = data.get("docs", {})
+            _log.info("rag_load", extra={
+                "layer": "core",
+                "path": self._persist_path,
+                "count": len(self._docs),
+            })
+        except Exception as e:
+            _log.warning("rag_load_failed", extra={
+                "layer": "core",
+                "path": self._persist_path,
+                "error": str(e),
+            })
+
+    def _save(self) -> None:
+        """Save documents to the persistent JSON file."""
+        if not self._persist_path:
+            return
+        try:
+            path = Path(self._persist_path)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            data = {"docs": self._docs, "collection": self._collection_name}
+            path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+            _log.debug("rag_save", extra={
+                "layer": "core",
+                "path": self._persist_path,
+                "count": len(self._docs),
+            })
+        except Exception as e:
+            _log.warning("rag_save_failed", extra={
+                "layer": "core",
+                "path": self._persist_path,
+                "error": str(e),
+            })
 
     @property
     def collection_name(self) -> str:
@@ -130,6 +195,7 @@ class InMemoryRAGStore(BaseRAGStore):
             "design": design_content,
             "code": code_content,
         }
+        self._save()
         return doc_id
 
     def query_similar(self, query_text: str, n_results: int = 5) -> list[dict]:
@@ -199,6 +265,10 @@ class InMemoryRAGStore(BaseRAGStore):
         if hasattr(self, "_tfidf_ids"):
             self._tfidf_ids.clear()
             self._tfidf_list.clear()
+        if self._persist_path:
+            pp = Path(self._persist_path)
+            if pp.exists():
+                pp.unlink()
 
     def list_ids(self) -> list[str]:
         return list(self._docs.keys())
@@ -207,32 +277,41 @@ class InMemoryRAGStore(BaseRAGStore):
 class ChromaRAGStore(BaseRAGStore):
     """ChromaDB-backed persistent vector store.
 
-    Uses OpenAI embeddings for semantic similarity search.
-    Requires the `chromadb` package.
+    Uses ChromaDB's built-in embedding functions:
+      - Local: SentenceTransformer (all-MiniLM-L6-v2), no API key needed.
+      - OpenAI: text-embedding-3-small, requires OPENAI_API_KEY.
+
+    Embedding is delegated to ChromaDB internally — add/query only
+    pass documents and query texts, not raw vectors.
     """
 
     def __init__(
         self,
         persist_dir: str = "./chroma_data",
-        api_key: Optional[str] = None,
-        embedding_model: str = "text-embedding-3-small",
+        api_key: str = "",
+        embedding_model: str = "all-MiniLM-L6-v2",
+        embedding_provider: str = "local",
         collection_name: str = DEFAULT_COLLECTION,
+        base_url: str = "",
     ):
         """Initialize the ChromaDB-backed RAG store.
 
         Args:
             persist_dir: Directory for persistent ChromaDB storage.
-            api_key: OpenAI API key for embeddings.
-            embedding_model: OpenAI embedding model name.
+            api_key: API key for OpenAI embeddings.
+            embedding_model: Model name for the embedding function.
+            embedding_provider: "local" or "openai".
             collection_name: ChromaDB collection name.
+            base_url: Custom base URL for OpenAI embeddings API.
         """
         import chromadb
         from chromadb.config import Settings
 
-        self._persist_dir = persist_dir
-        self._api_key = api_key or os.environ.get("OPENAI_API_KEY", "")
-        self._embedding_model = embedding_model
         self._collection_name = collection_name
+        self._embedding_provider = embedding_provider
+        self._embedding_model = embedding_model
+        self._api_key = api_key
+        self._base_url = base_url
 
         os.makedirs(persist_dir, exist_ok=True)
 
@@ -241,27 +320,36 @@ class ChromaRAGStore(BaseRAGStore):
             settings=Settings(anonymized_telemetry=False),
         )
 
-        self._openai = None
-        if self._api_key:
-            from openai import OpenAI
-            self._openai = OpenAI(api_key=self._api_key)
-        self._embed_fn = self._embed_remote if self._openai else self._embed_dummy
-
+        self._ef = self._create_embedding_function()
         self._collection = self._client.get_or_create_collection(
             name=collection_name,
+            embedding_function=self._ef,
             metadata={"description": "Code examples: design doc + implementation pairs"},
         )
+        _log.info("chromadb_init", extra={
+            "layer": "core",
+            "provider": embedding_provider,
+            "model": embedding_model,
+            "path": persist_dir,
+        })
 
-    def _embed_remote(self, text: str) -> list[float]:
-        resp = self._openai.embeddings.create(
-            model=self._embedding_model,
-            input=text,
-        )
-        return resp.data[0].embedding
-
-    @staticmethod
-    def _embed_dummy(text: str) -> list[float]:
-        return [0.0] * 128
+    def _create_embedding_function(self):
+        """Create the appropriate ChromaDB embedding function."""
+        if self._embedding_provider == "openai" and self._api_key:
+            api_key = self._api_key or os.environ.get("OPENAI_API_KEY", "")
+            from chromadb.utils.embedding_functions import OpenAIEmbeddingFunction
+            kwargs = {"api_key": api_key, "model_name": self._embedding_model}
+            if self._base_url:
+                kwargs["api_base"] = self._base_url
+            return OpenAIEmbeddingFunction(**kwargs)
+        else:
+            from chromadb.utils.embedding_functions import ONNXMiniLM_L6_V2
+            _log.info("chromadb_local_embedding", extra={
+                "layer": "core",
+                "model": "all-MiniLM-L6-v2 (ONNX)",
+                "detail": "Using local ONNX embeddings, no API key needed.",
+            })
+            return ONNXMiniLM_L6_V2()
 
     def add_example(
         self,
@@ -276,23 +364,19 @@ class ChromaRAGStore(BaseRAGStore):
 
         doc_id = doc_id or str(uuid.uuid4())
 
-        embedding = self._embed_fn(combined)
-
         existing = self._collection.get(ids=[doc_id])
         if existing and existing["ids"]:
             self._collection.update(
                 ids=[doc_id],
-                embeddings=[embedding],
-                metadatas=[meta],
                 documents=[combined],
+                metadatas=[meta],
             )
             _log.debug("rag_update", extra={"layer": "core", "doc_id": doc_id})
         else:
             self._collection.add(
                 ids=[doc_id],
-                embeddings=[embedding],
-                metadatas=[meta],
                 documents=[combined],
+                metadatas=[meta],
             )
             _log.debug("rag_add", extra={"layer": "core", "doc_id": doc_id})
 
@@ -302,10 +386,8 @@ class ChromaRAGStore(BaseRAGStore):
         if self._collection.count() == 0:
             return []
 
-        embedding = self._embed_fn(query_text)
-
         results = self._collection.query(
-            query_embeddings=[embedding],
+            query_texts=[query_text],
             n_results=min(n_results, self._collection.count()),
         )
 
@@ -332,6 +414,7 @@ class ChromaRAGStore(BaseRAGStore):
         self._client.delete_collection(self._collection_name)
         self._collection = self._client.get_or_create_collection(
             name=self._collection_name,
+            embedding_function=self._ef,
             metadata={"description": "Code examples: design doc + implementation pairs"},
         )
 

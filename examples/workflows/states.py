@@ -1,4 +1,4 @@
-"""Global State models for the example order processing workflow.
+"""Global State models for CodeGen workflows.
 
 All fields have explicit defaults as required by the LiteAgent architecture.
 Pydantic v2 validates state invariants on every state transition.
@@ -7,33 +7,6 @@ Layer: Workflow layer (third layer).
 """
 
 from pydantic import BaseModel, Field
-
-
-class OrderState(BaseModel):
-    """Global state for the order processing workflow.
-
-    This is the single source of truth pushed through the LangGraph
-    state graph. Every field must have a default value.
-    """
-
-    order_id: str = Field(default="", description="Unique order identifier.")
-    customer_name: str = Field(default="", description="Customer name for the order.")
-    customer_tier: str = Field(default="new", description="Customer tier: new, bronze, silver, gold.")
-    amount: float = Field(default=0.0, description="Order amount in USD.")
-    region: str = Field(default="NA", description="Destination region code.")
-    product: str = Field(default="", description="Product being ordered.")
-
-    search_query: str = Field(default="", description="Formatted search query for the search agent.")
-    search_result: str = Field(default="", description="Search agent output summary.")
-
-    risk_score: int = Field(default=0, description="Risk score 0-100 from risk agent.")
-    risk_level: str = Field(default="", description="Risk level: low, medium, high, critical.")
-    risk_flags: list[str] = Field(default_factory=list, description="Risk flags from assessment.")
-
-    final_decision: str = Field(default="pending", description="Final decision: pending, approved, held, blocked.")
-    decision_reason: str = Field(default="", description="Reason for the final decision.")
-
-    error: str = Field(default="", description="Error message if any node fails.")
 
 
 class IndexState(BaseModel):
